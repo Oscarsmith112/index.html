@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load Dispatch Tool</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: #f1f5f9;
+    color: #0f172a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    max-width: 680px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 22px; color: #1e40af; margin-bottom: 14px; }
+  h2 { font-size: 16px; margin: 0 0 10px 0; color: #334155; }
+  .card {
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 14px;
+    border: 1px solid #cbd5e1;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  input, textarea {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 14px;
+  }
+  textarea {
+    min-height: 290px;
+    font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    resize: vertical;
+  }
+  .btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  button, .file-btn {
+    background: #1e40af;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 14px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  button:hover { background: #1d4ed8; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .gray { background: #475569; }
+  .gray:hover { background: #334155; }
+  .green { background: #059669; }
+  .green:hover { background: #047857; }
+  .red { background: #dc2626; }
+  .red:hover { background: #b91c1c; }
+  details { margin-top: 10px; font-size: 13px; color: #64748b; }
+  summary { cursor: pointer; font-weight: 600; color: #475569; }
+  .hint { font-size: 13px; color: #64748b; line-height: 1.4; margin: 6px 0; }
+  #status { color: #b45309; font-size: 13px; min-height: 18px; margin-top: 8px; font-weight: 500; }
+  .saved-item {
+    border-top: 1px solid #e2e8f0;
+    padding: 10px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .saved-item strong { color: #1e40af; font-size: 15px; }
+  .saved-item p { margin: 2px 0 0; font-size: 12px; color: #64748b; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🚚 Load Dispatch Tool</h1>
+
+  <!-- 1. UPLOAD -->
+  <div class="card">
+    <h2>1. Upload Rate Confirmation</h2>
+    <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp">
+    <div class="btn-row">
+      <button id="localBtn" onclick="extractLocal()">⚡ Extract (Text PDF)</button>
+      <button id="aiBtn" class="gray" onclick="extractAI()">🤖 Extract with AI (Scans & Images)</button>
+    </div>
+    
+    <details>
+      <summary>⚙️ Optional Backup AI Key</summary>
+      <p class="hint">Used automatically if Netlify's server key fails. Kept in browser only.</p>
+      <input type="password" id="backupKey" placeholder="Google AI Studio Key (AIzaSy...)">
+    </details>
+    
+    <div id="status"></div>
+  </div>
+
+  <!-- 2. EDIT DIRECTLY -->
+  <div class="card">
+    <h2>2. Dispatch Message (Edit Directly)</h2>
+    <textarea id="message" placeholder="Message will generate here..."></textarea>
+    <div class="btn-row">
+      <button id="milesBtn" class="gray" onclick="calculateMiles()">🗺️ Estimate Miles (ZIP to ZIP)</button>
+      <button class="green" onclick="copyMessage()">📋 Copy</button>
+      <button onclick="saveDispatch()">💾 Save</button>
+    </div>
+    <p class="hint">Mileage calculates road distance between pickup and delivery ZIP codes (or City, ST). Free and automatic.</p>
+  </div>
+
+  <!-- 3. SAVED LOADS -->
+  <details class="card">
+    <summary>📁 Saved Dispatches History</summary>
+    <div style="margin: 10px 0 6px;">
+      <input id="search" placeholder="Search by Load #..." oninput="renderSaved()">
+    </div>
+    <div id="savedList"></div>
+    <div class="btn-row">
+      <button class="gray" onclick="exportBackup()">Export Backup (JSON)</button>
+      <label class="file-btn gray" style="display:inline-block;">
+        Import Backup <input type="file" id="importFile" accept=".json" style="display:none;" onchange="importBackup(event)">
+      </label>
+    </div>
+  </details>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+const STORE = "dispatch_history_v1";
+
+function status(msg) { $("status").textContent = msg; }
+function getFile() { return $("file").files[0]; }
+
+// --- 1. LOCAL EXTRACTION ---
+async function readPdfText(file) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  let text = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(it => it.str).join(" ") + "\n";
+  }
+  return text;
+}
+
+function findMatch(str, regex) {
+  const m = str.match(regex);
+  return m ? m[1].trim() : "";
+}
+
+async function extractLocal() {
+  const file = getFile();
+  if (!file) { status("Please choose a PDF file first."); return; }
+  if (!file.name.toLowerCase().endsWith(".pdf")) { status("Local extraction only supports text PDFs. Use AI for images."); return; }
+
+  status("Reading PDF locally...");
+  $("localBtn").disabled = true;
+
+  try {
+    const text = await readPdfText(file);
+    if (!text.trim()) throw new Error("No readable text found. This may be a scanned PDF. Use 'Extract with AI'.");
+
+    const loadNo = findMatch(text, /\b(?:load\s*#?|LD\s*[:#])\s*([A-Z0-9-]+)/i);
+    const poNo = findMatch(text, /\b(?:PO\s*#?|PONumber|PO:)\s*([A-Z0-9-]+)/i);
+    let puNo = findMatch(text, /\b(?:pickup\s*#)\s*([A-Z0-9-]+)/i);
+    if (puNo === "1") puNo = "";
+    const weight = findMatch(text, /(\d[\d,]*\s*(?:lbs?|pounds|k\s*lbs?))/i);
+
+    let lines = [];
+    lines.push(`LD :${loadNo || ""}`);
+    lines.push(`PO: ${poNo || ""}`);
+    if (puNo) lines.push(`PU# :${puNo}`);
+    lines.push("\n");
+    lines.push("PU: [Date/Time]");
+    lines.push("[Pickup Facility Name]");
+    lines.push("[Street, City, ST, ZIP]");
+    lines.push("\n");
+    lines.push("Del: [Date/Time]");
+    lines.push("[Delivery Facility Name]");
+    lines.push("[Street, City, ST, ZIP]");
+    lines.push("\n");
+    lines.push("Miles: 0");
+    lines.push(`weight:${weight || "N/A"}`);
+
+    $("message").value = lines.join("\n");
+    status("Basic extraction complete. Enter missing addresses/dates or use AI.");
+  } catch (err) {
+    status(err.message);
+  } finally {
+    $("localBtn").disabled = false;
+  }
+}
+
+// --- 2. AI EXTRACTION (NETLIFY SERVERLESS + BROWSER BACKUP) ---
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = () => reject(new Error("File read error"));
+    reader.readAsDataURL(file);
+  });
+}
+
+const AI_PROMPT = `
+Extract dispatch details from this Rate Confirmation. Return ONLY a single JSON object with these exact string keys:
+"load_number", "po_number", "pickup_number", "pickup_dt", "pickup_name", "pickup_addr", "del_dt", "del_name", "del_addr", "weight", "miles", "deadhead".
+
+Instructions:
+- Keep full appointment date/time windows (e.g. "11-04-2026 8AM - 4PM").
+- Keep full facility addresses with City, State, and Zip on one line.
+- Do not invent info. Use empty string "" if missing.`;
+
+async function extractAI() {
+  const file = getFile();
+  if (!file) { status("Please choose a file first."); return; }
+
+  const btn = $("aiBtn");
+  btn.disabled = true;
+  status("Sending document to AI...");
+
+  try {
+    const mimes = { pdf:"application/pdf", png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", webp:"image/webp" };
+    const ext = file.name.split(".").pop().toLowerCase();
+    const mime = mimes[ext] || "application/pdf";
+    const base64Data = await fileToBase64(file);
+
+    let parsed = null;
+
+    // 1. Try Netlify Backend Function
+    try {
+      const res = await fetch("/.netlify/functions/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mime, data: base64Data })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        parsed = json.fields;
+      }
+    } catch (_) {}
+
+    // 2. Fallback to Client-Side Key if Netlify backend fails
+    if (!parsed) {
+      const backupKey = $("backupKey").value.trim();
+      if (!backupKey) {
+        throw new Error("Netlify AI failed or is not configured. Add your key in Netlify, or enter a Backup Key below.");
+      }
+      status("Using backup AI key directly...");
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${backupKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: AI_PROMPT }, { inline_data: { mime_type: mime, data: base64Data } }] }],
+          generationConfig: { responseMimeType: "application/json" }
+        })
+      });
+      if (!res.ok) throw new Error(`Google AI API error (${res.status}). Verify key.`);
+      const data = await res.json();
+      parsed = JSON.parse(data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
+    }
+
+    // Format output
+    let lines = [];
+    lines.push(`LD :${parsed.load_number || ""}`);
+    lines.push(`PO: ${parsed.po_number || ""}`);
+    if (parsed.pickup_number && parsed.pickup_number !== parsed.po_number) {
+      lines.push(`PU# :${parsed.pickup_number}`);
+    }
+    lines.push("\n");
+    lines.push(`PU: ${parsed.pickup_dt || ""}`);
+    if (parsed.pickup_name) lines.push(parsed.pickup_name);
+    if (parsed.pickup_addr) lines.push(parsed.pickup_addr);
+    lines.push("\n");
+    lines.push(`Del: ${parsed.del_dt || ""}`);
+    if (parsed.del_name) lines.push(parsed.del_name);
+    if (parsed.del_addr) lines.push(parsed.del_addr);
+    lines.push("\n");
+    let mStr = `Miles: ${parsed.miles || "0"}`;
+    if (parsed.deadhead) mStr += ` +${parsed.deadhead}dh`;
+    lines.push(mStr);
+    lines.push(`weight:${parsed.weight || "N/A"}`);
+
+    $("message").value = lines.join("\n");
+    status("AI extraction complete!");
+
+    // Automatically calculate ZIP-to-ZIP miles if addresses are available
+    if (parsed.pickup_addr && parsed.del_addr && (!parsed.miles || parsed.miles === "0")) {
+      calculateMiles();
+    }
+  } catch (err) {
+    status(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// --- 3. ZIP-TO-ZIP / CITY-TO-CITY MILEAGE LOOKUP ---
+function extractLocationQuery(textBlock) {
+  // 1. Search for 5-digit US ZIP code
+  const zip = textBlock.match(/\b\d{5}\b/);
+  if (zip) return { query: `postalcode=${zip[0]}&countrycodes=us`, label: `ZIP ${zip[0]}` };
+
+  // 2. Fallback: Search for City, 2-letter State
+  const cityState = textBlock.match(/([A-Za-z\s.]+),\s*([A-Z]{2})\b/);
+  if (cityState) return { query: `q=${encodeURIComponent(cityState[0] + ", USA")}`, label: cityState[0] };
+
+  return null;
+}
+
+async function geocodeTarget(loc) {
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&${loc.query}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Location lookup temporarily busy.");
+  const data = await res.json();
+  if (!data.length) throw new Error(`Could not locate ${loc.label}.`);
+  return { lat: data[0].lat, lon: data[0].lon, label: loc.label };
+}
+
+async function calculateMiles() {
+  const msg = $("message").value;
+  const puIdx = msg.indexOf("PU:");
+  const delIdx = msg.indexOf("Del:");
+  const milesIdx = msg.indexOf("Miles:");
+
+  if (puIdx === -1 || delIdx === -1) {
+    status("Make sure PU: and Del: sections exist in the message.");
+    return;
+  }
+
+  const puBlock = msg.substring(puIdx, delIdx);
+  const delBlock = msg.substring(delIdx, milesIdx !== -1 ? milesIdx : msg.length);
+
+  const puLoc = extractLocationQuery(puBlock);
+  const delLoc = extractLocationQuery(delBlock);
+
+  if (!puLoc || !delLoc) {
+    status("Could not find ZIP code or City, State in both pickup and delivery sections.");
+    return;
+  }
+
+  status(`Routing: ${puLoc.label} ➔ ${delLoc.label}...`);
+  $("milesBtn").disabled = true;
+
+  try {
+    const from = await geocodeTarget(puLoc);
+    await new Promise(r => setTimeout(r, 600)); // Respect free rate-limit
+    const to = await geocodeTarget(delLoc);
+
+    const routeRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?overview=false`);
+    const routeJson = await routeRes.json();
+    if (!routeJson.routes || !routeJson.routes.length) throw new Error("No driving route found.");
+
+    const miles = Math.round(routeJson.routes[0].distance / 1609.344);
+
+    // Update Miles line in textarea while keeping any deadhead info
+    const current = $("message").value;
+    const dhMatch = current.match(/\+\s*\d+dh/i);
+    const dhStr = dhMatch ? ` ${dhMatch[0]}` : "";
+
+    if (/Miles\s*:/i.test(current)) {
+      $("message").value = current.replace(/Miles\s*:.*$/im, `Miles: ${miles}${dhStr}`);
+    } else {
+      $("message").value = current.trimEnd() + `\nMiles: ${miles}${dhStr}\n`;
+    }
+
+    status(`Estimated ${miles} miles (${from.label} ➔ ${to.label})`);
+  } catch (err) {
+    status(`Mileage lookup: ${err.message}`);
+  } finally {
+    $("milesBtn").disabled = false;
+  }
+}
+
+// --- 4. COPY & LOCAL STORAGE ---
+async function copyMessage() {
+  const txt = $("message").value;
+  if (!txt.trim()) return;
+  try {
+    await navigator.clipboard.writeText(txt);
+    status("Copied to clipboard! ✔");
+  } catch {
+    $("message").select();
+    status("Press Ctrl+C / Cmd+C to copy.");
+  }
+}
+
+function getSaved() {
+  return JSON.parse(localStorage.getItem(STORE) || "[]");
+}
+
+function saveDispatch() {
+  const msg = $("message").value.trim();
+  const match = msg.match(/^LD\s*:\s*(.+)$/im);
+  const loadNo = match ? match[1].trim() : "";
+
+  if (!loadNo || loadNo.toLowerCase().includes("needs review")) {
+    status("Please enter a valid Load # on the LD line before saving.");
+    return;
+  }
+
+  const list = getSaved();
+  const idx = list.findIndex(item => item.load.toLowerCase() === loadNo.toLowerCase());
+  const entry = { load: loadNo, message: msg, date: new Date().toISOString() };
+
+  if (idx >= 0) list[idx] = entry;
+  else list.unshift(entry);
+
+  localStorage.setItem(STORE, JSON.stringify(list));
+  renderSaved();
+  status(`Dispatch LD :${loadNo} saved!`);
+}
+
+function renderSaved() {
+  const box = $("savedList");
+  const q = $("search").value.trim().toLowerCase();
+  const list = getSaved().filter(it => it.load.toLowerCase().includes(q));
+
+  box.innerHTML = "";
+  if (!list.length) {
+    box.innerHTML = '<p class="hint">No saved dispatches found.</p>';
+    return;
+  }
+
+  list.forEach(item => {
+    const div = document.createElement("div");
+    div.className = "saved-item";
+    div.innerHTML = `
+      <div>
+        <strong>LD :${item.load}</strong>
+        <p>${new Date(item.date).toLocaleDateString()} ${new Date(item.date).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p>
+      </div>
+      <div>
+        <button class="gray" onclick='loadItem(${JSON.stringify(item.load)})'>Open</button>
+        <button class="red" onclick='deleteItem(${JSON.stringify(item.load)})'>Delete</button>
+      </div>
+    `;
+    box.appendChild(div);
+  });
+}
+
+function loadItem(loadNo) {
+  const item = getSaved().find(it => it.load === loadNo);
+  if (item) {
+    $("message").value = item.message;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    status(`Loaded LD :${loadNo}`);
+  }
+}
+
+function deleteItem(loadNo) {
+  if (!confirm(`Delete load ${loadNo}?`)) return;
+  const list = getSaved().filter(it => it.load !== loadNo);
+  localStorage.setItem(STORE, JSON.stringify(list));
+  renderSaved();
+}
+
+function exportBackup() {
+  const blob = new Blob([localStorage.getItem(STORE) || "[]"], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `dispatch_backup_${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+}
+
+function importBackup(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    try {
+      const data = JSON.parse(ev.target.result);
+      if (!Array.isArray(data)) throw new Error();
+      localStorage.setItem(STORE, JSON.stringify(data));
+      renderSaved();
+      status("Backup imported successfully!");
+    } catch {
+      status("Invalid backup file.");
+    }
+  };
+  r.readAsText(file);
+}
+
+renderSaved();
+</script>
+
+<!-- NETLIFY BUILD AUTOMATION: Extracts this function block on deployment -->
+<script type="text/plain" id="netlify-function">
+/* NETLIFY_FUNCTION_START */
+const PROMPT = `
+Extract dispatch details from this Rate Confirmation. Return ONLY a single JSON object with these exact string keys:
+"load_number", "po_number", "pickup_number", "pickup_dt", "pickup_name", "pickup_addr", "del_dt", "del_name", "del_addr", "weight", "miles", "deadhead".
+
+Instructions:
+- Keep full appointment date/time windows (e.g. "11-04-2026 8AM - 4PM").
+- Keep full facility addresses with City, State, and Zip on one line.
+- Do not invent info. Use empty string "" if missing.`;
+
+exports.handler = async function(event) {
+  if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
+  const key = (process.env.GOOGLE_AI_KEY || "").trim();
+  if (!key) return { statusCode: 503, body: JSON.stringify({ error: "No API Key in Netlify" }) };
+
+  try {
+    const input = JSON.parse(event.body);
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: PROMPT }, { inline_data: { mime_type: input.mime, data: input.data } }] }],
+        generationConfig: { responseMimeType: "application/json" }
+      })
+    });
+
+    if (!res.ok) return { statusCode: 502, body: JSON.stringify({ error: "Google AI rejected the request." }) };
+    const data = await res.json();
+    const parsed = JSON.parse(data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
+    return {
+      statusCode: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fields: parsed })
+    };
+  } catch (err) {
+    return { statusCode: 500, body: JSON.stringify({ error: "Server processing failed." }) };
+  }
+};
+/* NETLIFY_FUNCTION_END */
+</script>
+</body>
+</html>
